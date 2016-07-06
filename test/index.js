@@ -5,15 +5,22 @@
 require('mocha-generators').install();
 
 var Nightmare = require('..');
+var IPC = require('../lib/ipc');
 var chai = require('chai');
 var url = require('url');
 var server = require('./server');
+var https = require('https');
 var fs = require('fs');
 var mkdirp = require('mkdirp');
 var path = require('path');
 var rimraf = require('rimraf');
 var child_process = require('child_process');
+var PNG = require('pngjs').PNG;
 var should = chai.should();
+var split = require('split');
+var asPromised = require('chai-as-promised');
+
+chai.use(asPromised);
 
 /**
  * Temporary directory
@@ -36,11 +43,29 @@ var base = 'http://localhost:7500/';
 describe('Nightmare', function () {
   before(function (done) {
     server.listen(7500, done);
+    Nightmare = withDeprecationTracking(Nightmare);
+  });
+
+  after(function() {
+    Nightmare.assertNoDeprecations();
   });
 
   it('should be constructable', function*() {
     var nightmare = Nightmare();
     nightmare.should.be.ok;
+    yield nightmare.end();
+  });
+
+  it('should have version information', function*(){
+    var nightmare = Nightmare();
+    var versions = yield nightmare.engineVersions();
+    nightmare.engineVersions.electron.should.be.ok;
+    nightmare.engineVersions.chrome.should.be.ok;
+
+    versions.electron.should.be.ok;
+    versions.chrome.should.be.ok;
+
+    Nightmare.version.should.be.ok;
     yield nightmare.end();
   });
 
@@ -64,15 +89,121 @@ describe('Nightmare', function () {
     });
   });
 
+  it.only('should end gracefully if the chain has not been started', function(done) {
+    var child = child_process.fork(
+      path.join(__dirname, 'files', 'nightmare-created.js'));
+
+    child.once('message', function() {
+      child.once('exit', function(code) {
+        code.should.equal(0);
+        done();
+      });
+      child.kill();
+    });
+  });
+
+  it('should exit with a non-zero code on uncaughtExecption', function(done) {
+    var child = child_process.fork(
+      path.join(__dirname, 'files', 'nightmare-error.js'), [], {silent: true});
+
+      child.once('exit', function(code) {
+        code.should.not.equal(0);
+        done();
+      });
+  });
+
+  it('should provide a .catch function', function(done) {
+    var nightmare = Nightmare();
+
+    nightmare
+      .goto('about:blank')
+      .evaluate(function() {
+        throw new Error('Test');
+      })
+      .catch(function(err) {
+        done();
+      });
+  });
+
+  it('should allow ending more than once', function(done){
+    var nightmare = Nightmare();
+    nightmare.goto(fixture('navigation'))
+      .end()
+      .then(() => nightmare.end())
+      .then(() => done());
+  });
+  
+  it('should provide useful errors for .click', function(done) {
+    var nightmare = Nightmare();
+
+    nightmare
+      .goto('about:blank')
+      .click('a.not-here')
+      .catch(function (error) {
+        error.should.include('a.not-here');
+        done();
+      });
+  });
+
+  it('should provide useful errors for .mousedown', function(done) {
+    var nightmare = Nightmare();
+
+    nightmare
+      .goto('about:blank')
+      .mousedown('a.not-here')
+      .catch(function (error) {
+        error.should.include('a.not-here');
+        done();
+      });
+  });
+
+  it('should provide useful errors for .mouseover', function(done) {
+    var nightmare = Nightmare();
+
+    nightmare
+      .goto('about:blank')
+      .mouseover('a.not-here')
+      .catch(function (error) {
+        error.should.include('a.not-here');
+        done();
+      });
+  });
+
   describe('navigation', function () {
     var nightmare;
 
     beforeEach(function() {
-      nightmare = Nightmare();
+      nightmare = Nightmare({
+        webPreferences: {partition: 'test-partition' + Math.random()},
+        loadTimeout: 45 * 1000
+      });
     });
 
     afterEach(function*() {
       yield nightmare.end();
+    });
+
+    it('should return data about the response', function*() {
+      var data = yield nightmare.goto(fixture('navigation'));
+      data.should.contain.keys('url', 'code', 'method', 'referrer', 'headers');
+    });
+
+    it('should reject with a useful message when no URL', function() {
+      return nightmare.goto(undefined).then(
+        function() {throw new Error('goto(undefined) didn’t cause an error');},
+        function(error) {
+          error.should.include('url');
+        }
+      );
+    });
+
+    it('should reject with a useful message for an empty URL', function() {
+      return nightmare.goto('').then(
+        function() {throw new Error('goto(undefined) didn’t cause an error');},
+        function(error) {
+          error.should.include('url');
+        }
+      );
     });
 
     it('should click on a link and then go back', function*() {
@@ -149,6 +280,215 @@ describe('Nightmare', function () {
           return (expectedA === textA && expectedB === textB);
         }, 'A', 'B');
     });
+
+    it('should fail if navigation target is invalid', function() {
+      return nightmare.goto('http://this-is-not-a-real-domain.tld')
+        .then(
+          function() {
+            throw new Error('Navigation to an invalid domain succeeded');
+          }, function(error) {
+            error.should.contain.keys('message', 'code', 'url');
+            error.code.should.be.a('number');
+          });
+    });
+
+    it('should fail if navigation target is a malformed URL', function(done) {
+      nightmare.goto('somewhere out there')
+        .then(function() {
+          done(new Error('Navigation to an invalid domain succeeded'));
+        })
+        .catch(function(error) {
+          done();
+        });
+    });
+
+    it('should fail if navigating to an unknown protocol', function(done) {
+      nightmare.goto('fake-protocol://blahblahblah')
+        .then(function() {
+          done(new Error('Navigation to an invalid protocol succeeded'));
+        })
+        .catch(function(error) {
+          done();
+        });
+    });
+
+    it('should not fail if the URL loads but a resource fails', function() {
+      return nightmare.goto(fixture('navigation/invalid-image'));
+    });
+
+    it('should not fail if a child frame fails', function() {
+      return nightmare.goto(fixture('navigation/invalid-frame'));
+    });
+
+    it('should return correct data when child frames are present', function*() {
+      var data = yield nightmare.goto(fixture('navigation/valid-frame'));
+      data.should.have.property('url');
+      data.url.should.equal(fixture('navigation/valid-frame'));
+    });
+
+    it('should not fail if response was a valid error (e.g. 404)', function() {
+      return nightmare.goto(fixture('navigation/not-a-real-page'));
+    });
+
+    it('should fail if the response dies in flight', function(done) {
+      nightmare.goto(fixture('do-not-respond'))
+        .then(function() {
+          done(new Error('Navigation succeeded but server connection died'));
+        })
+        .catch(function(error) {
+          done();
+        });
+    });
+
+    it('should not fail for a redirect', function() {
+      return nightmare.goto(fixture('redirect?url=%2Fnavigation'));
+    });
+
+    it('should fail for a redirect to an invalid URL', function(done) {
+      nightmare.goto(
+        fixture('redirect?url=http%3A%2F%2Fthis-is-not-a-real-domain.tld'))
+        .then(function() {
+          done(new Error('Navigation succeeded with redirect to bad location'));
+        })
+        .catch(function(error) {
+          done();
+        });
+    });
+
+    it('should succeed properly if request handler is present', function() {
+      Nightmare.action(
+        'monitorRequest',
+        function(name, options, parent, win, renderer, done) {
+          win.webContents.session.webRequest.onBeforeRequest(
+            ['*://localhost:*'],
+            function(details, callback) {
+              callback({cancel: false});
+            }
+          );
+          done();
+        },
+        function(done) {
+          done();
+          return this;
+        });
+
+      return Nightmare({webPreferences: {partition: 'test-partition'}})
+        .goto(fixture('navigation'))
+        .end();
+    });
+
+    it('should fail properly if request handler is present', function(done) {
+      Nightmare.action(
+        'monitorRequest',
+        function(name, options, parent, win, renderer, done) {
+          win.webContents.session.webRequest.onBeforeRequest(
+            ['*://localhost:*'],
+            function(details, callback) {
+              callback({cancel: false});
+            }
+          );
+          done();
+        },
+        function(done) {
+          done();
+          return this;
+        });
+
+      Nightmare({webPreferences: {partition: 'test-partition'}})
+        .goto('http://this-is-not-a-real-domain.tld')
+        .then(function() {
+          done(new Error('Navigation to an invalid domain succeeded'));
+        })
+        .catch(function(error) {
+          done();
+        });
+    });
+
+    it('should support javascript URLs', function*() {
+      var gotoResult = yield nightmare
+        .goto(fixture('navigation'))
+        .goto('javascript:void(document.querySelector(".a").textContent="LINK");');
+      gotoResult.should.be.an('object');
+
+      var linkText = yield nightmare
+        .evaluate(function() {
+          return document.querySelector('.a').textContent;
+        });
+      linkText.should.equal('LINK');
+    });
+
+    it('should support javascript URLs that load pages', function*() {
+      var data = yield nightmare
+        .goto(fixture('navigation'))
+        .goto(`javascript:window.location='${fixture('navigation/a.html')}'`);
+      data.should.contain.keys('url', 'code', 'method', 'referrer', 'headers');
+      data.url.should.equal(fixture('navigation/a.html'));
+
+      var linkText = yield nightmare
+        .evaluate(function() {
+          return document.querySelector('.d').textContent;
+        });
+      linkText.should.equal('D');
+    });
+
+    describe('timeouts', function() {
+      it('should time out after 30 seconds of loading', function() {
+        // allow this test to go particularly long
+        this.timeout(40000);
+        return nightmare.goto(fixture('wait')).should.be.rejected
+          .then(function(error) {
+            error.code.should.equal(-7);
+          });
+      });
+
+      it('should allow custom goto timeout on the constructor', function() {
+        var startTime = Date.now();
+        return Nightmare({gotoTimeout: 1000}).goto(fixture('wait')).end()
+          .should.be.rejected
+          .then(function(error) {
+            // allow a few extra seconds for browser startup
+            (startTime - Date.now()).should.be.below(3000);
+          });
+      });
+
+      it('should allow a timeout to succeed if DOM loaded', function() {
+        return Nightmare({gotoTimeout: 1000})
+          .goto(fixture('navigation/hanging-resources.html'))
+          .end()
+          .then(function(data) {
+            data.details.should.include('1000 ms');
+          });
+      });
+
+      it('should allow actions on a hanging page', function() {
+        return Nightmare({gotoTimeout: 500})
+          .goto(fixture('navigation/hanging-resources.html'))
+          .evaluate(() => document.title)
+          .end()
+          .then(function(title) {
+            title.should.equal('Hanging resource load');
+          });
+      });
+
+      it('should allow loading a new page after timing out', function() {
+        nightmare.end().then();
+        nightmare = Nightmare({gotoTimeout: 1000});
+        return nightmare.goto(fixture('wait')).should.be.rejected
+          .then(function() {
+            return nightmare.goto(fixture('navigation'));
+          });
+      });
+
+      it('should allow for timeouts for non-goto loads', function*() { // ###
+        this.timeout(40000);
+        var nightmare = Nightmare({loadTimeout: 30000});
+        yield nightmare
+          .goto(fixture('navigation'))
+          .click('#never-ends');
+
+        yield nightmare.end();
+      });
+    });
   });
 
   describe('evaluation', function () {
@@ -214,6 +554,13 @@ describe('Nightmare', function () {
         }, 'testparameter');
       title.should.equal('Evaluation -- testparameter');
     });
+
+    it('should capture invalid evaluate fn', function() {
+      return nightmare
+        .goto(fixture('evaluation'))
+        .evaluate('not_a_function')
+        .should.be.rejected;
+    });
   });
 
   describe('manipulation', function () {
@@ -239,6 +586,24 @@ describe('Nightmare', function () {
       var numAnchors = yield nightmare
         .goto(fixture('manipulation'))
         .inject('js', 'test/files/jquery-2.1.1.min.js')
+        .evaluate(function () {
+          return $('h1').length;
+        });
+      numAnchors.should.equal(1);
+    });
+
+    it('should inject javascript onto the page ending with a comment', function*() {
+      var globalNumber = yield nightmare
+        .goto(fixture('manipulation'))
+        .inject('js', 'test/files/globals.js')
+        .evaluate(function () {
+          return globalNumber;
+        });
+      globalNumber.should.equal(7);
+
+      var numAnchors = yield nightmare
+        .goto(fixture('manipulation'))
+        .inject('js', 'test/files/jquery-1.9.0.min.js')
         .evaluate(function () {
           return $('h1').length;
         });
@@ -368,6 +733,20 @@ describe('Nightmare', function () {
       value.should.equal('');
     })
 
+    it('should not type in a nonexistent selector', function(){
+      return nightmare
+        .goto(fixture('manipulation'))
+        .type('does-not-exist', 'nightmare')
+        .should.be.rejected;
+    });
+
+    it('should not insert in a nonexistent selector', function(){
+      return nightmare
+        .goto(fixture('manipulation'))
+        .insert('does-not-exist', 'nightmare')
+        .should.be.rejected;
+    });
+
     it('should blur the active element when something is clicked', function*() {
       var isBody = yield nightmare
         .goto(fixture('manipulation'))
@@ -487,7 +866,8 @@ describe('Nightmare', function () {
     var nightmare;
 
     beforeEach(function() {
-      nightmare = Nightmare().goto(fixture('cookie'));
+      nightmare = Nightmare({webPreferences: {partition: 'test-partition'}})
+        .goto(fixture('cookie'));
     });
 
     afterEach(function*() {
@@ -605,9 +985,31 @@ describe('Nightmare', function () {
       var cookies = yield cookies.get({ path: '/cookie' });
 
       cookies.length.should.equal(0);
-    })
-  })
+    });
 
+    it('.set([cookie]) & .clear() & .get()', function*() {
+      var cookies = nightmare.cookies
+
+      yield cookies.set([
+        {
+          name: 'hi',
+          value: 'hello',
+          path: '/'
+        },
+        {
+          name: 'nightmare',
+          value: 'rocks',
+          path: '/cookie'
+        }
+      ])
+
+      yield cookies.clear();
+
+      var cookies = yield cookies.get();
+
+      cookies.length.should.equal(0);
+    })
+  });
 
   describe('rendering', function () {
     var nightmare;
@@ -672,6 +1074,53 @@ describe('Nightmare', function () {
       image.length.should.be.at.least(300);
     });
 
+    // repeat this test 3 times, since the concern here is non-determinism in
+    // the timing accuracy of screenshots -- it might pass once, but likely not
+    // several times in a row.
+    for (var i = 0; i < 3; i++) {
+      it('should screenshot an up-to-date image of the page (' + i + ')', function*() {
+        var image = yield nightmare
+          .goto('about:blank')
+          .viewport(100, 100)
+          .evaluate(function() { document.body.style.background = '#900'; })
+          .evaluate(function() { document.body.style.background = '#090'; })
+          .screenshot();
+
+        var png = new PNG();
+        var imageData = yield png.parse.bind(png, image);
+        var firstPixel = Array.from(imageData.data.slice(0, 3));
+        firstPixel.should.deep.equal([0, 153, 0]);
+      });
+    }
+
+    it('should screenshot an an idle page', function*() {
+      var image = yield nightmare
+        .goto('about:blank')
+        .viewport(100, 100)
+        .evaluate(function() { document.body.style.background = '#900'; })
+        .evaluate(function() { document.body.style.background = '#090'; })
+        .wait(1000)
+        .screenshot();
+
+      var png = new PNG();
+      var imageData = yield png.parse.bind(png, image);
+      var firstPixel = Array.from(imageData.data.slice(0, 3));
+      firstPixel.should.deep.equal([0, 153, 0]);
+    });
+
+    it('should not subscribe to frames until necessary', function() {
+      var didSubscribe = false;
+      var FrameManager = require('../lib/frame-manager.js');
+      var manager = FrameManager({
+        webContents: {
+          beginFrameSubscription: function() { didSubscribe = true; },
+          endFrameSubscription: function() {},
+          executeJavaScript: function() {}
+        }
+      });
+      didSubscribe.should.be.false;
+    });
+
     it('should load jquery correctly', function*() {
       var loaded = yield nightmare
         .goto(fixture('rendering'))
@@ -689,6 +1138,14 @@ describe('Nightmare', function () {
         .screenshot(tmp_dir+'/font-rendering.png');
       var stats = fs.statSync(tmp_dir+'/font-rendering.png');
       stats.size.should.be.at.least(1000);
+    });
+
+    it('should save as html', function*() {
+      yield nightmare
+        .goto(fixture('manipulation'))
+        .html(tmp_dir+'/test.html');
+      var stats = fs.statSync(tmp_dir+'/test.html');
+      stats.should.be.ok;
     });
 
     it('should render a PDF', function*() {
@@ -717,6 +1174,32 @@ describe('Nightmare', function () {
       buf.length.should.be.at.least(1000);
       isBuffer.should.be.true;
     });
+  });
+
+  describe('referer', function() {
+    var nightmare;
+
+    beforeEach(function() {
+      nightmare = Nightmare({webPreferences: {partition: 'test-partition'}});
+    });
+
+    afterEach(function*() {
+      yield nightmare.end();
+    });
+
+    it('should return referer from headers', function*() {
+      var referer = 'http://my-referer.tld/';
+      var returnedReferer = yield nightmare
+        .goto(fixture('referer'), {
+          'Referer': referer
+        })
+        .evaluate(function () {
+          return document.body.innerText;
+        })
+        ;
+
+      referer.should.be.equal(returnedReferer.trim());
+    })
   });
 
   describe('events', function () {
@@ -761,9 +1244,12 @@ describe('Nightmare', function () {
         if (type === 'log') log = str
       });
 
-      yield nightmare.goto(fixture('events'))
-
+      yield nightmare.goto(fixture('events'));
       log.should.equal('my log');
+
+      yield nightmare.click('button')
+      log.should.equal('clicked');
+
     });
 
     it('should fire an event on page load failure', function*() {
@@ -772,8 +1258,11 @@ describe('Nightmare', function () {
         .on('did-fail-load', function () {
           fired = true;
         });
-      yield nightmare
-        .goto('https://alskdjfasdfuuu.com');
+      try {
+        yield nightmare
+          .goto('https://alskdjfasdfuuu.com');
+      }
+      catch(error) {}
       fired.should.be.true;
     });
 
@@ -830,10 +1319,68 @@ describe('Nightmare', function () {
       confirm.should.equal('my confirm');
       response.should.equal('hello!');
     });
+
+    it('should only fire once when using once', function*() {
+      var events = 0;
+      nightmare.once('page', function(type, message) {
+        events++;
+      });
+
+      yield nightmare
+        .goto(fixture('events'))
+      events.should.equal(1);
+    });
+
+    it('should remove event listener', function*() {
+      var events = 0;
+      var handler = function(type, message) {
+        if (type === 'alert') {
+          events++;
+        }
+      };
+
+      nightmare.on('page', handler);
+
+      yield nightmare
+        .goto(fixture('events'))
+        .evaluate(function(){
+          alert('alert one');
+        });
+
+      nightmare.removeListener('page', handler);
+      
+      yield nightmare
+        .evaluate(function(){
+          alert('alert two');
+        });
+
+      events.should.equal(1);
+    });
   });
 
   describe('options', function () {
     var nightmare;
+    var server;
+
+    before(function(done) {
+      // set up an HTTPS server using self-signed certificates -- Nightmare
+      // will only be able to talk to it if 'ignore-certificate-errors' is set.
+      server = https.createServer({
+        key: fs.readFileSync(path.join(__dirname, 'files', 'server.key')),
+        cert: fs.readFileSync(path.join(__dirname, 'files', 'server.crt'))
+      }, function(request, response) {
+        response.end('ok\n');
+      }).listen(0, 'localhost', function() {
+        var address = server.address();
+        server.url = `https://${address.address}:${address.port}`;
+        done();
+      });
+    });
+
+    after(function() {
+      server.close();
+      server = null;
+    });
 
     afterEach(function*() {
       yield nightmare.end();
@@ -850,51 +1397,33 @@ describe('Nightmare', function () {
       useragent.should.eql('firefox');
     });
 
-    it('should wait and fail with waitTimeout', function*() {
-      var didFail = false;
-      try {
-        nightmare = Nightmare({waitTimeout: 254});
-        yield nightmare
-          .goto(fixture('navigation'))
-          .wait('foobar');
-      } catch (e) {
-        didFail = true;
-      }
-      didFail.should.be.true;
+    it('should wait and fail with waitTimeout', function() {
+      nightmare = Nightmare({waitTimeout: 254});
+      return nightmare
+        .goto(fixture('navigation'))
+        .wait('foobar')
+        .should.be.rejected;
     });
 
-    it('should wait and fail with waitTimeout and a ms wait time', function*() {
-      var didFail = false;
-      try {
-        nightmare = Nightmare({waitTimeout: 254});
-       yield nightmare
-          .goto(fixture('navigation'))
-          .wait(1000);
-      } catch (e) {
-        didFail = true;
-      }
-      didFail.should.be.true;
+    it('should wait and fail with waitTimeout and a ms wait time', function() {
+      nightmare = Nightmare({waitTimeout: 254});
+      return nightmare
+        .goto(fixture('navigation'))
+        .wait(1000)
+        .should.be.rejected;
     });
 
-    it('should wait and fail with waitTimeout with queued functions', function*() {
-      var didFail = false;
-      try {
-        nightmare = Nightmare({waitTimeout: 254});
-        yield nightmare
-          .goto(fixture('navigation'))
-          .wait('foobar')
-          .exists('baz');
-      } catch (e) {
-        didFail = true;
-      }
-      didFail.should.be.true;
+    it('should wait and fail with waitTimeout with queued functions', function() {
+      nightmare = Nightmare({waitTimeout: 254});
+      return nightmare
+        .goto(fixture('navigation'))
+        .wait('foobar')
+        .exists('baz')
+        .should.be.rejected;
     });
-
-    /*
-    PENDING FIX UPSTREAM
-    https://github.com/atom/electron/issues/1362
 
     it('should set authentication', function*() {
+      nightmare = Nightmare();
       var data = yield nightmare
         .authentication('my', 'auth')
         .goto(fixture('auth'))
@@ -903,10 +1432,9 @@ describe('Nightmare', function () {
         });
       data.should.eql({ name: 'my', pass: 'auth' });
     });
-    */
 
     it('should set viewport', function*() {
-      var size = { width: 400, height: 300, 'use-content-size': true };
+      var size = { width: 400, height: 300, useContentSize: true };
       nightmare = Nightmare(size);
       var result = yield nightmare
         .goto(fixture('options'))
@@ -970,8 +1498,31 @@ describe('Nightmare', function () {
     });
 
     it('should be constructable with switches', function*() {
-      nightmare = Nightmare({ switches:{} });
+      nightmare = Nightmare({
+        switches: {
+          // empty string and non-string values all represent no value
+          'ignore-certificate-errors': null,
+          'touch-events': ''
+        }
+      });
       nightmare.should.be.ok;
+      var touchEvents = yield nightmare
+        .goto(server.url)
+        .evaluate(function() {
+          return 'ontouchstart' in window;
+        });
+      touchEvents.should.be.true;
+    });
+
+    it('should support switches with values', function*() {
+      nightmare = Nightmare({ switches: { 'force-device-scale-factor': '5' } });
+      nightmare.should.be.ok;
+      var scaleFactor = yield nightmare
+        .goto('about:blank')
+        .evaluate(function() {
+          return window.devicePixelRatio;
+        });
+      scaleFactor.should.equal(5);
     });
 
     it('should allow to use external Electron', function*() {
@@ -981,10 +1532,6 @@ describe('Nightmare', function () {
   });
 
   describe('Nightmare.action(name, fn)', function() {
-    beforeEach(function() {
-      nightmare = Nightmare();
-    });
-
     afterEach(function*() {
       yield nightmare.end();
     });
@@ -1001,7 +1548,9 @@ describe('Nightmare', function () {
         }, done)
       })
 
-      var size = yield Nightmare()
+      nightmare = new Nightmare();
+
+      var size = yield nightmare
         .goto(fixture('simple'))
         .size()
 
@@ -1023,7 +1572,7 @@ describe('Nightmare', function () {
         }
       })
 
-      var nightmare = Nightmare()
+      nightmare = Nightmare()
       yield nightmare.goto(fixture('simple'))
       var background = yield nightmare.style.background()
       var color = yield nightmare.style.color()
@@ -1031,6 +1580,57 @@ describe('Nightmare', function () {
       background.should.equal('rgba(0, 0, 0, 0)')
       color.should.equal('rgb(0, 0, 0)')
     })
+
+    it('should support extending Electron', function*(){
+      Nightmare.action('bind',
+        function(ns, options, parent, win, renderer, done) {
+          var sliced = require('sliced');
+          parent.on('bind', function(name) {
+            if (renderer.listeners(name)
+              .length == 0) {
+              renderer.on(name, function() {
+                parent.emit.apply(parent, [name].concat(sliced(arguments, 1)))
+              });
+            }
+            parent.emit('bind');
+          });
+          done();
+        },
+        function() {
+          var name = arguments[0],
+            handler, done;
+          if (arguments.length == 2) {
+            done = arguments[1];
+          } else if (arguments.length == 3) {
+            handler = arguments[1];
+            done = arguments[2];
+          }
+          if (handler) {
+            this.child.on(name, handler);
+          }
+          this.child.once('bind', done);
+          this.child.emit('bind', name);
+        });
+
+      var eventResults;
+      nightmare = new Nightmare();
+      yield nightmare
+        .goto('http://example.com')
+        .on('sample-event', function() {
+          eventResults = arguments;
+        })
+        .bind('sample-event')
+        .evaluate(function() {
+          ipc.send('sample-event', 'sample', 3, {
+            sample: 'sample'
+          });
+        });
+
+      eventResults.length.should.equal(3);
+      eventResults[0].should.equal('sample');
+      eventResults[1].should.equal(3);
+      eventResults[2].sample.should.equal('sample');
+    });
   })
 
   describe('Nightmare.use', function() {
@@ -1043,8 +1643,7 @@ describe('Nightmare', function () {
     });
 
     it('should support extending nightmare', function*() {
-      var nightmare = Nightmare()
-      var tagName = yield Nightmare()
+      var tagName = yield nightmare
         .goto(fixture('simple'))
         .use(select('h1'))
 
@@ -1085,6 +1684,144 @@ describe('Nightmare', function () {
       value.should.equal('custom')
     })
   })
+
+  describe('devtools', function(){
+    beforeEach(function() {
+      Nightmare.action('waitForDevTools',
+        function(ns, options, parent, win, renderer, done){
+          parent.on('waitForDevTools', function() {
+            function opened() { parent.emit('waitForDevTools', null, true); }
+            if (win.webContents.isDevToolsOpened()) {
+              return opened();
+            }
+            win.webContents.once('devtools-opened', opened);
+          });
+          done();
+        },
+        function(done){
+          this.child.once('waitForDevTools', done);
+          this.child.emit('waitForDevTools');
+        });
+      nightmare = Nightmare({show:true, openDevTools:true});
+
+    });
+
+    afterEach(function*(){
+      yield nightmare.end();
+    });
+
+    it('should open devtools', function*(){
+      var devToolsOpen = yield nightmare
+        .goto(fixture('simple'))
+        .waitForDevTools();
+
+      devToolsOpen.should.be.true;
+    });
+  });
+
+  describe('ipc', function(){
+    beforeEach(function() {
+      Nightmare.action('test',
+        function(_, __, parent, ___, ____, done) {
+          parent.respondTo('test', function(arg1, done) {
+            done.progress('one');
+            done.progress('two');
+            if (arg1 === 'error') {
+              return done('Error!');
+            }
+            else {
+              done(null, `Got ${arg1}`);
+            }
+          });
+          done();
+        },
+        function(options, done) {
+          var channel = this.child.call('test', options.arg || options, done);
+          if (options.onData) { channel.on('data', options.onData); }
+          if (options.onEnd) { channel.on('end', options.onEnd); }
+        });
+      Nightmare.action('noImplementation',
+        function(done) {
+          this.child.call('noImplementation', done);
+        });
+      nightmare = Nightmare();
+    });
+
+    afterEach(function*(){
+      yield nightmare.end();
+    });
+
+    it('should only make one IPC instance per process', function() {
+      var processStub = {send: function() {}, on: function(){}};
+      var ipc1 = IPC(processStub);
+      var ipc2 = IPC(processStub);
+      ipc1.should.equal(ipc2);
+    });
+
+    it('should support basic call-response', function*() {
+      var result = yield nightmare.test('x');
+      result.should.equal('Got x');
+    });
+
+    it('should support errors across IPC', function(done) {
+      nightmare.test('error').then(
+        function() {
+          done(new Error('Action succeeded when it should have errored!'));
+        },
+        function() {
+          done();
+        });
+    });
+
+    it('should stream progress', function*() {
+      var progress = [];
+      yield nightmare.test({
+        arg: 'x',
+        onData: (data) => progress.push(data),
+        onEnd: (error, data) => progress.push([error, data])
+      });
+      progress.should.deep.equal(['one', 'two', [null, 'Got x']]);
+    });
+
+    it('should trigger error if no responder is registered', function(done) {
+      nightmare.noImplementation().then(
+        function() {
+          done(new Error('Action succeeded when it should have errored!'));
+        },
+        function() {
+          done();
+        });
+    });
+
+    it('should log a warning when replacing a responder', function*() {
+      Nightmare.action('uhoh',
+        function(_, __, parent, ___, ____, done) {
+          parent.respondTo('test', function(done) {
+            done();
+          });
+          done();
+        },
+        function(done) {
+          this.child.call('test', done);
+        });
+
+      var logged = false;
+      var instance = Nightmare();
+      instance._queue.splice(1, 0, [function(done) {
+        this.child.on('nightmare:ipc:debug', function(message) {
+          if (message.toLowerCase().indexOf('replacing') > -1) {
+            logged = true;
+          }
+        });
+        done();
+      }, []]);
+
+      yield instance
+        .goto('about:blank')
+        .end();
+      logged.should.be.true;
+    });
+  });
 });
 
 /**
@@ -1096,6 +1833,37 @@ describe('Nightmare', function () {
 
 function fixture(path) {
   return url.resolve(base, path);
+}
+
+/**
+ * Track deprecation warnings.
+ */
+
+function withDeprecationTracking(constructor) {
+  var newConstructor = function() {
+    var instance = constructor.apply(this, arguments);
+    instance.queue((done)=>{
+      instance.proc.stderr.pipe(split()).on('data', (line) => {
+        if (line.indexOf('deprecated') > -1) {
+          newConstructor.__deprecations.add(line);
+        }
+      });
+      done();
+    });
+    return instance;
+  };
+  newConstructor.__deprecations = new Set();
+  newConstructor.assertNoDeprecations = function() {
+    var deprecations = Nightmare.__deprecations;
+    if (deprecations.size) {
+      var plural = deprecations.size === 1 ? '' : 's';
+      throw new Error(
+        `Used ${deprecations.size} deprecated Electron API${plural}:
+        ${Array.from(deprecations).join('\n        ')}`);
+    }
+  }
+  Object.setPrototypeOf(newConstructor, constructor);
+  return newConstructor;
 }
 
 /**
