@@ -1,3 +1,37 @@
+2.7.0 / 2016-09-05
+==================
+
+  * Adds `.wait(element, timeout)` to wait for whichever comes first
+  * `.end()` will now end Electron gracefully instead of issuing a `SIGKILL`
+  * Touches up readme for `.end()`
+
+2.6.1 / 2016-08-08
+==================
+
+  * Fixes treating provisional load failures as real load failures
+
+2.6.0 / 2016-08-02
+==================
+
+  * Makes the CircleCI badge an SVG
+  * Adds an option for `.type()` to control time elapsed between keystrokes with `typeInterval`
+  * Adds `.cookies.clearAll()` to clear all cookies
+  * Fixes crashing if the Electron process is closed first
+  * Adds `pollInterval` as an option to control the tick time for `.wait()`
+  * Forces Nightmare to error on bad HTTP authentication
+  * Fixes a crash by omitting event data due to circular references
+  * Adds environment variable forwarding to the Electron process
+  * Fixes `openDevTools` docs to be more explicit about detaching the devtools tray
+  * Fixes the link to the preload script
+
+2.5.3 / 2016-07-08
+==================
+
+  * Adds better proxy information to the readme
+  * Fixes a readme typo
+  * Updates `ipcRenderer` usage for preload scripts in readme
+  * Bumps Electron to version 1.2.5
+
 2.5.2 / 2016-06-20
 ==================
 

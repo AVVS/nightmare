@@ -89,7 +89,20 @@ describe('Nightmare', function () {
     });
   });
 
-  it.only('should end gracefully if the chain has not been started', function(done) {
+  it('should gracefully handle electron being killed', function(done) {
+    var child = child_process.fork(
+      path.join(__dirname, 'files', 'nightmare-unended.js'));
+      
+    child.once('message', function(electronPid) {
+      process.kill(electronPid, 'SIGINT');
+      child.once('exit', function(){
+        electronPid.should.not.be.a.process;
+        done();
+      });
+    });
+  });
+
+  it('should end gracefully if the chain has not been started', function(done) {
     var child = child_process.fork(
       path.join(__dirname, 'files', 'nightmare-created.js'));
 
@@ -132,7 +145,7 @@ describe('Nightmare', function () {
       .then(() => nightmare.end())
       .then(() => done());
   });
-  
+
   it('should provide useful errors for .click', function(done) {
     var nightmare = Nightmare();
 
@@ -181,6 +194,7 @@ describe('Nightmare', function () {
 
     afterEach(function*() {
       yield nightmare.end();
+      Nightmare.resetActions();
     });
 
     it('should return data about the response', function*() {
@@ -251,6 +265,21 @@ describe('Nightmare', function () {
     });
 
     it('should wait until element is present', function*() {
+      yield nightmare
+        .goto(fixture('navigation'))
+        .wait('a');
+    });
+
+    it('should soft timeout if element does not appear', function*() {
+      yield nightmare
+        .goto(fixture('navigation'))
+        .wait('ul', 150);
+    });
+
+    it('should wait until element is present with a modified poll interval', function*() {
+      nightmare = Nightmare({
+        pollInterval: 50
+      });
       yield nightmare
         .goto(fixture('navigation'))
         .wait('a');
@@ -429,6 +458,50 @@ describe('Nightmare', function () {
           return document.querySelector('.d').textContent;
         });
       linkText.should.equal('D');
+    });
+
+    it('should fail immediately/not time out for 304 statuses', function() {
+      return Nightmare({gotoTimeout: 500})
+        .goto(fixture('not-modified'))
+        .end()
+        .then(function() {
+          throw new Error('Navigating to a 304 should return an error');
+        },
+        function(error) {
+          if (error.code === -7) {
+            throw new Error('Navigating to a 304 should not time out');
+          }
+        });
+    });
+
+    it('should not time out for aborted loads', function() {
+      Nightmare.action(
+        'abortRequests',
+        function(name, options, parent, win, renderer, done) {
+          win.webContents.session.webRequest.onBeforeRequest(
+            ['*://localhost:*'],
+            function(details, callback) {
+              setTimeout(() => win.webContents.stop(), 0);
+              callback({cancel: false});
+            }
+          );
+          done();
+        },
+        function() {
+          done();
+        });
+
+      return Nightmare({gotoTimeout: 500})
+        .goto(fixture('navigation'))
+        .end()
+        .then(function() {
+          throw new Error('An aborted page load should return an error');
+        },
+        function(error) {
+          if (error.code === -7) {
+            throw new Error('Aborting a page load should not time out');
+          }
+        });
     });
 
     describe('timeouts', function() {
@@ -1009,6 +1082,47 @@ describe('Nightmare', function () {
 
       cookies.length.should.equal(0);
     })
+
+    it('.set([cookie]) & .clearAll() & .get()', function*() {
+      yield nightmare.cookies.set([
+        {
+          name: 'hi',
+          value: 'hello',
+          path: '/'
+        },
+        {
+          name: 'nightmare',
+          value: 'rocks',
+          path: '/cookie'
+        }
+      ]);
+
+      yield nightmare.goto(fixture('simple'));
+
+      yield nightmare.cookies.set([
+        {
+          name: 'hi',
+          value: 'hello',
+          path: '/'
+        },
+        {
+          name: 'nightmare',
+          value: 'rocks',
+          path: '/cookie'
+        }
+      ]);
+
+
+      yield nightmare.cookies.clearAll();
+
+      var cookies = yield nightmare.cookies.get();
+      cookies.length.should.equal(0);
+
+      yield nightmare.goto(fixture('cookie'))
+
+      cookies = yield nightmare.cookies.get();
+      cookies.length.should.equal(0);
+    })
   });
 
   describe('rendering', function () {
@@ -1348,7 +1462,7 @@ describe('Nightmare', function () {
         });
 
       nightmare.removeListener('page', handler);
-      
+
       yield nightmare
         .evaluate(function(){
           alert('alert two');
@@ -1431,6 +1545,27 @@ describe('Nightmare', function () {
           return JSON.parse(document.querySelector('pre').innerHTML);
         });
       data.should.eql({ name: 'my', pass: 'auth' });
+    });
+
+    it('should fail on authentication failure', function*() {
+      nightmare = Nightmare();
+      var data = yield nightmare
+        .authentication('my', 'wrong')
+        .goto(fixture('auth'))
+        .should.be.rejected;
+    });
+
+    it('should be able to update authentication', function*(){
+      nightmare = Nightmare();
+      var data = yield nightmare
+        .authentication('my', 'auth')
+        .goto(fixture('auth'))
+        .authentication('my2', 'auth2')
+        .goto(fixture('auth2'))
+        .evaluate(function () {
+          return JSON.parse(document.querySelector('pre').innerHTML);
+        });
+      data.should.eql({ name: 'my2', pass: 'auth2' });
     });
 
     it('should set viewport', function*() {
@@ -1528,7 +1663,7 @@ describe('Nightmare', function () {
     it('should allow to use external Electron', function*() {
       nightmare = Nightmare({ electronPath: require('electron-prebuilt') });
       nightmare.should.be.ok;
-    })
+    });
   });
 
   describe('Nightmare.action(name, fn)', function() {
@@ -1630,6 +1765,31 @@ describe('Nightmare', function () {
       eventResults[0].should.equal('sample');
       eventResults[1].should.equal(3);
       eventResults[2].sample.should.equal('sample');
+    });
+
+    it('should allow env variables', function*() {
+      Nightmare.action('envtest',
+        function (name, options, parent, win, renderer, done) {
+          parent.respondTo('envtest', function(done){
+            done(null, process.env);
+          });
+          done();
+        },
+        function(done) {
+          this.child.call('envtest', done);
+        }
+      );
+      nightmare = Nightmare({
+        env: {
+          TZ: 'UTC'
+        }
+      });
+      nightmare.should.be.ok;
+      var envTest = yield nightmare
+        .goto('about:bank')
+        .envtest();
+      envTest.should.be.ok;
+      envTest.should.have.property('TZ', 'UTC');
     });
   })
 
@@ -1865,6 +2025,32 @@ function withDeprecationTracking(constructor) {
   Object.setPrototypeOf(newConstructor, constructor);
   return newConstructor;
 }
+
+/**
+ * Make plugins resettable for tests
+ */
+var _action = Nightmare.action;
+var _pluginNames = [];
+var _existingNamespaces = Nightmare.namespaces.slice();
+var _existingChildActions = Object.assign({}, Nightmare.childActions);
+Nightmare.action = function (name) {
+  _pluginNames.push(name);
+  return _action.apply(this, arguments);
+};
+// NOTE: this is somewhat fragile since there's no public API for removing
+// plugins. If you touch `Nightmare.action`, please be sure to update this.
+Nightmare.resetActions = function () {
+  _pluginNames.splice(0, _pluginNames.length).forEach((name) => {
+    delete this.prototype[name];
+  });
+  this.namespaces.splice(0, this.namespaces.length);
+  this.namespaces.push.apply(this.namespaces, _existingNamespaces);
+  Object.keys(this.childActions).forEach((name) => {
+    if (!_existingChildActions[name]) {
+      delete this.childActions[name];
+    }
+  });
+};
 
 /**
  * Simple assertion for running processes
