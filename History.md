@@ -1,3 +1,52 @@
+
+2.10.0 / 2017-02-23
+===================
+
+  * Remove redundant docs for 'log' event from README
+  * changed some `var` declarations to `const`
+  * replace the 404 link with valid link
+  * added Promise override tests
+  * added docs for new Promise override features
+  * added ability to override internal Promise library
+
+2.9.1 / 2017-01-02
+==================
+
+  * Minor touchups to key press documentation
+  * Link to Electron documentation updated
+  * Updates speed information on the readme
+  * Swaps Yahoo example out for a faster DuckDuckGo example
+  * Fixes an issue where `nightmare` may be undefined in the browser at injection time
+  * Changes screenshot rendering to use debugger API instead of forcing a DOM change
+
+2.9.0 / 2016-12-17
+==================
+
+  * Prevents unload dialogs, allowing Nightmare to end gracefully
+  * `.end(fn)` now uses `.then()` under the covers
+  * **Possibly breaking change:** Nightmare will now default to using a non-persistent partition.  Data between executions of Nightmare will no longer be saved.
+  * Adds `.mouseup()` action
+  * Fixes several typos/copy-paste errors in the readme, as well as clarifying error-first callbacks
+  * Adds `.path()` to get the URL's route (as opposed to the fully-qualified URL)
+
+2.8.1 / 2016-10-20
+==================
+
+  * Fixes parsing issues with arguments to `evaluate_now`
+  * Upgrades to Electron 1.4.4
+
+2.8.0 / 2016-10-20
+==================
+
+  * Fixes a missing semicolon in the first readme example
+  * Fixes a reference error inside `.wait()` when using `node --use_strict`
+  * Adds missing documentation for `.mouseover()`
+  * Corrects a typo in the readme
+  * Removes dependency on `object-assign`
+  * Adds `.halt()` API to stop Nightmare execution immediately
+  * Fixes `blur` exception when elements are removed by keyboard events
+  * **Possibly breaking change:** Changes `.evaluate()` to allow for asynchronous execution.  If the `.evaluate()`d function's arity is one less than the passed in parameters, it'll assume the last argument to the function is the callback. If the return value is a thenable, it'll call `then()` to wait for promise fulfillment. Otherwise, the call will behave synchronously as it does now.
+
 2.7.0 / 2016-09-05
 ==================
 
